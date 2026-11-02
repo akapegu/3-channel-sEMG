@@ -14,6 +14,8 @@ The acquisition code follows the supplier's NPG-Lite software and BLE data forma
 
 The conventional time-domain feature baseline follows established myoelectric pattern-recognition work ([Hudgins et al., 1993](https://pubmed.ncbi.nlm.nih.gov/8468080/)). Project-specific protocol and signal-processing notes are in [`docs/semg_literature_review.md`](docs/semg_literature_review.md). Detailed experiment artifacts remain in the working tree; the source recordings and local trial log are excluded from Git by design.
 
+See [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) for the measured results, current assumptions, and planned evaluation steps.
+
 ## Repository map
 
 | Path | Contents |
