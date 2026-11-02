@@ -7,6 +7,7 @@
 - The four-direction test split was a later chronological block of the same continuous wearing. It is not an independent re-wear/day evaluation.
 - Live shadow mode has shown per-window predictions but had no movement labels during free-running captures. These predictions do not measure classifier accuracy.
 - The separate clench game currently uses a 20 ms RMS window and 10 ms update hop. Its runtime event counts are not accuracy or response-latency results without movement timestamps.
+- The first saved fast-detector game run contained 537,740 filtered samples over 537.78 s and 818 threshold-trigger events. There were no time-aligned clench annotations, so this does not show 818 intentional clenches or indicate accuracy. Raw and filtered source files remain local and are excluded from Git.
 
 ## Assumptions
 
