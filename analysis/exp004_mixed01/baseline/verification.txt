@@ -1,0 +1,1 @@
+PASS: synthetic classifier; constant-feature handling; training-only scaling; disjoint EMG sample partitions; accuracy recomputed from saved predictions.

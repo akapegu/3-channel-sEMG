@@ -1,0 +1,37 @@
+# Local operating-system and editor files
+.DS_Store
+.idea/
+.vscode/
+**/__pycache__/
+*.py[cod]
+
+# Python environments and tool caches
+**/.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Personal biosignal recordings and machine-specific derived data
+/recordings/
+/supplier_toolkit/adapted/raw_packets/
+/supplier_toolkit/adapted/training_data/
+/analysis/exp012_live_flap/
+/analysis/exp016_swipe_shadow/signals/
+/analysis/exp016_swipe_shadow/predictions/
+/experiment_list.md
+
+# Model weights, signal exports, plots, and numerical caches
+*.csv
+*.json
+*.jsonl
+*.npz
+*.joblib
+*.keras
+*.h5
+*.tflite
+*.onnx
+*.png
+*.pdf
+
+# Local review snapshots kept for provenance, not required by the codebase
+/archive/

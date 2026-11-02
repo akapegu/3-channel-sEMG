@@ -1,0 +1,10 @@
+              precision    recall  f1-score   support
+
+   extension      0.962     1.000     0.980        75
+     flexion      0.878     0.973     0.923        74
+       pinch      0.446     0.835     0.581        79
+        rest      0.974     0.854     0.910       650
+
+    accuracy                          0.875       878
+   macro avg      0.815     0.916     0.849       878
+weighted avg      0.917     0.875     0.887       878

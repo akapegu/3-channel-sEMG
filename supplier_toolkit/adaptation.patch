@@ -1,0 +1,927 @@
+--- upstream/check_adaptation.py
++++ adapted/check_adaptation.py
+@@ -0,0 +1,46 @@
++"""Synthetic checks only. No Bluetooth access or user-data training."""
++import json
++import os
++import struct
++import tempfile
++from pathlib import Path
++from types import SimpleNamespace
++import numpy as np
++from scipy.signal import butter,sosfilt,sosfreqz
++from rate_filters import CausalSOS,NotchFilter,EXGFilter,PROFILE
++from split_plan import load_plan
++
++rng=np.random.default_rng(17);values=rng.normal(size=4000)
++for sos in [butter(2,70,btype='highpass',fs=1000,output='sos'),butter(2,[48,52],btype='bandstop',fs=1000,output='sos')]:
++ state=CausalSOS(sos);observed=np.array([state.process(v) for v in values]);assert np.allclose(observed,sosfilt(sos,values),atol=1e-11)
++notch=NotchFilter();notch.set_sampling_rate(1000);hp=EXGFilter();hp.set_bits('12',1000)
++combined=np.array([hp.process(notch.process(v,1),4) for v in values])
++assert np.allclose(combined,sosfilt(butter(2,70,btype='highpass',fs=1000,output='sos'),sosfilt(butter(2,[48,52],btype='bandstop',fs=1000,output='sos'),values)),atol=1e-10)
++_,response=sosfreqz(butter(2,[48,52],btype='bandstop',fs=1000,output='sos'),worN=[50,100],fs=1000)
++assert abs(response[0])<.001 and abs(response[1])>.99
++# Importing modules must not connect to a band or begin model training.
++import record_gesture as recorder
++import gesture_ui_server as dashboard
++assert recorder.NotchFilter is dashboard.NotchFilter
++assert recorder.EXGFilter is dashboard.EXGFilter
++assert recorder.SAMPLING_RATE==1000
++with tempfile.TemporaryDirectory() as folder:
++ previous=os.getcwd();os.chdir(folder)
++ try:
++  device=recorder.DeviceRecorder(SimpleNamespace(name='SYNTHETIC',address='synthetic'),None,channels=3,role='test')
++  emg=struct.pack('>BHHH',0,1000,2000,3000)*20
++  imu=struct.pack('>Bhhh',255,-32768,2,32767)+struct.pack('>Bhhh',0,-3,4,5)
++  device.handle_notify(None,emg);device.handle_imu_notify(None,imu);device.raw_file.close()
++  packets=[json.loads(x) for x in Path(device.raw_path).read_text().splitlines()]
++  assert bytes.fromhex(packets[0]['payload_hex'])==emg
++  assert bytes.fromhex(packets[1]['payload_hex'])==imu
++  assert len(device.rows)==20 and device.latest_accel==[-3,4,5]
++  merged=recorder.merge_and_save(folder,'rest',1,[device],reps=None,mode='continuous')
++  meta=json.loads(Path(merged['csv_path']).with_suffix('.processing.json').read_text())
++  assert meta['sampling_rate']==1000 and meta['preprocessing_profile']==PROFILE
++  manifest=Path(folder)/'split.json';manifest.write_text(json.dumps({'files':[{'path':'a.csv','partition':'train','acquisition_group':'g'},{'path':'b.csv','partition':'test','acquisition_group':'g'}]}))
++  try:load_plan(manifest,folder)
++  except ValueError:pass
++  else:raise AssertionError('Acquisition group leakage accepted')
++ finally:os.chdir(previous)
++print('PASS: causal filter/scipy equivalence, correct notch frequency, shared record/live filters, native rate, byte-exact raw EMG/IMU logging, metadata, group leakage rejection.')
+--- upstream/check_live_pipeline.py
++++ adapted/check_live_pipeline.py
+@@ -0,0 +1,72 @@
++"""Five-second diagnostic of adapted supplier acquisition; not gesture training data."""
++import argparse
++import asyncio
++import csv
++import json
++import os
++import struct
++import time
++from pathlib import Path
++import numpy as np
++from bleak import BleakScanner
++from record_gesture import DeviceRecorder, merge_and_save, DATA_CHAR_UUID, IMU_CHAR_UUID
++from rate_filters import NotchFilter, EXGFilter, PROFILE
++
++
++async def run(out):
++    devices=await BleakScanner.discover(timeout=10,return_adv=True)
++    matches=[d for d,a in devices.values() if '27:bc' in (a.local_name or d.name or '').lower()]
++    if len(matches)!=1:raise RuntimeError(f'Expected one matching band, found {len(matches)}')
++    device=DeviceRecorder(matches[0],None,channels=3,role='dev1')
++    print('Connecting to',device.name,flush=True)
++    try:
++        await device.connect();await device.start_streaming()
++        deadline=time.perf_counter()+10
++        while not device.rows or not device.has_imu:
++            if time.perf_counter()>deadline:raise TimeoutError('Both data streams not received')
++            await asyncio.sleep(.02)
++        print('Both streams received; recording five seconds. No gestures needed.',flush=True)
++        await asyncio.sleep(5)
++    finally:
++        await device.stop_and_disconnect()
++    processed=out/'processed';processed.mkdir()
++    result=merge_and_save(str(processed),'pipelinecheck',1,[device],reps=None,mode='continuous')
++    logs=[json.loads(line) for line in Path(device.raw_path).read_text().splitlines()]
++    datasets={DATA_CHAR_UUID:[],IMU_CHAR_UUID:[]};packet_counts={DATA_CHAR_UUID:0,IMU_CHAR_UUID:0};malformed=0;empty=0
++    for packet in logs:
++        data=bytes.fromhex(packet['payload_hex']);kind=packet['characteristic']
++        if not data:empty+=1;continue
++        if len(data)%7:malformed+=1;continue
++        packet_id=packet_counts[kind];packet_counts[kind]+=1
++        fmt='>BHHH' if kind==DATA_CHAR_UUID else '>Bhhh'
++        for within,frame in enumerate(struct.iter_unpack(fmt,data)):
++            datasets[kind].append([packet_id,within,packet['host_monotonic_ns'],packet['host_unix_ns'],*frame])
++    summary={'device':device.name,'profile':PROFILE,'diagnostic_only':True,'processed_csv':result['csv_path'],
++             'raw_packets':device.raw_path,'malformed_packets':malformed,'empty_notifications':empty,'streams':{}}
++    for kind,name,columns in [(DATA_CHAR_UUID,'emg',['ch1_adc','ch2_adc','ch3_adc']),(IMU_CHAR_UUID,'accel',['accel_x_counts','accel_y_counts','accel_z_counts'])]:
++        rows=datasets[kind]
++        with (out/f'{name}_decoded.csv').open('x',newline='') as f:
++            w=csv.writer(f);w.writerow(['packet_index','index_in_packet','host_monotonic_ns','host_unix_ns','counter',*columns]);w.writerows(rows)
++        first_packet=sum(r[0]==0 for r in rows);span=(rows[-1][2]-rows[0][2])/1e9
++        steps=[(b[4]-a[4])%256 for a,b in zip(rows,rows[1:])]
++        summary['streams'][name]={'samples':len(rows),'packets':packet_counts[kind],'arrival_span_s':span,
++            'received_sps':(len(rows)-first_packet)/span if span else None,'nonunit_counter_transitions':sum(x!=1 for x in steps)}
++    nf=[NotchFilter() for _ in range(3)];ef=[EXGFilter() for _ in range(3)]
++    for n,e in zip(nf,ef):n.set_sampling_rate(1000);e.set_bits('12',1000)
++    replay=np.array([[ef[c].process(nf[c].process(row[5+c],1),4) for c in range(3)] for row in datasets[DATA_CHAR_UUID]])
++    actual=np.array([r[2:5] for r in device.rows])
++    assert actual.shape==replay.shape
++    error=float(np.max(np.abs(actual-replay)))
++    summary['max_live_vs_raw_replay_filter_error']=error
++    assert error==0
++    summary['all_processed_values_finite']=bool(np.isfinite(actual).all())
++    summary['note']='Original packets retained; arrival timestamps are not acquisition times. Startup filter transients included. No user gesture labels or accuracy measured.'
++    (out/'results.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary,indent=2),flush=True)
++
++
++if __name__=='__main__':
++    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--out',type=Path,required=True);args=parser.parse_args()
++    out=args.out.resolve();out.mkdir(parents=True,exist_ok=False);os.chdir(out)
++    try:asyncio.run(run(out))
++    except Exception as exc:
++        (out/'failure.json').write_text(json.dumps({'error':str(exc),'time_unix_ns':time.time_ns()},indent=2));raise
+--- upstream/gesture_controller.py
++++ adapted/gesture_controller.py
+@@ -1,3 +1,4 @@
++raise SystemExit('Keyboard controller is not adapted yet. Use the dashboard first; see ADAPTATION.md.')
+ """
+ gesture_controller.py
+ ----------------------
+--- upstream/gesture_ui_server.py
++++ adapted/gesture_ui_server.py
+@@ -46,7 +46,7 @@
+ # NotchFilter/EXGFilter only carry hand-derived biquad coefficients for these
+ # rates. main() refuses to start on anything else rather than letting the
+ # filters degrade to a pass-through and produce silently wrong predictions.
+-SUPPORTED_SAMPLING_RATES = (250, 500)
++SUPPORTED_SAMPLING_RATES = (1000,)
+ 
+ # Bleak's connect() can block indefinitely on some backends if the board goes
+ # out of range between the scan and the connect.
+@@ -231,6 +231,9 @@
+ # ==============================
+ # Shared state between BLE thread, model thread, and the HTTP server thread
+ # ==============================
++from rate_filters import NotchFilter, EXGFilter, PROFILE
++
++
+ class SharedState:
+     def __init__(self, num_channels, window_size, stride, classes, threshold):
+         self.lock = threading.Lock()
+@@ -831,6 +834,7 @@
+ 
+ def main():
+     ap = argparse.ArgumentParser()
++    ap.add_argument("--preview", action="store_true", help="Layout preview only: no model, predictions or BLE connection")
+     ap.add_argument("--model_dir", default="gesture_model")
+     ap.add_argument("--confidence_threshold", type=float, default=0.95,
+                      help="minimum top-class probability required before a gesture is "
+@@ -842,6 +846,16 @@
+                      help="connect to EVERY NPG-Lite board in range (old multi-ArmBand "
+                           "behavior) instead of prompting to pick one")
+     args = ap.parse_args()
++    if args.preview:
++        state = SharedState(6,500,250,['extension','flexion','pinch','rest'],args.confidence_threshold)
++        state.status_msg = 'LAYOUT PREVIEW — no model loaded; no sensor connection'
++        Handler.state = state
++        server = ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
++        print(f'Preview only: http://127.0.0.1:{args.port}',flush=True)
++        try: server.serve_forever()
++        except KeyboardInterrupt: pass
++        finally: server.server_close()
++        return
+ 
+     # encoding is explicit: open() otherwise uses the locale default (still
+     # cp1252 on many Windows setups) and non-ASCII class names would raise
+@@ -857,6 +871,12 @@
+               f"still looking confident. Retrain at a supported rate.")
+         return
+ 
++    if meta.get('synthetic_only'):
++        raise ValueError('Synthetic verification model cannot be used for live predictions')
++    if meta.get('preprocessing_profile') != PROFILE:
++        raise ValueError('Model processing profile differs from adapted live pipeline; train a matching model')
++    if args.all_devices:
++        raise ValueError('Adapted dashboard currently supports one band only')
+     window_size = meta["window_size"]
+     stride = meta["stride"]
+     num_channels = meta["num_channels"]
+--- upstream/legacy_filters.py
++++ adapted/legacy_filters.py
+@@ -0,0 +1,117 @@
++# Verbatim supplier filters; GPL-3.0; see LICENSE and UPSTREAM_REVISION.txt.
++class NotchFilter:
++    """50/60Hz mains notch filter. One instance PER CHANNEL (has internal state)."""
++
++    def __init__(self):
++        self.z1_1 = 0.0
++        self.z2_1 = 0.0
++        self.z1_2 = 0.0
++        self.z2_2 = 0.0
++        self.x_1 = 0.0
++        self.x_2 = 0.0
++        self.sampling_rate = 0
++
++    def set_sampling_rate(self, sampling_rate: int):
++        self.sampling_rate = sampling_rate
++
++    def process(self, input_val: float, notch_type: int) -> float:
++        if not notch_type:
++            return input_val
++
++        output = input_val
++
++        if self.sampling_rate == 500:
++            if notch_type == 1:  # 48-52 Hz
++                self.x_1 = output - (-1.56858163 * self.z1_1) - (0.96424138 * self.z2_1)
++                output = 0.96508099 * self.x_1 + -1.56202714 * self.z1_1 + 0.96508099 * self.z2_1
++                self.z2_1 = self.z1_1
++                self.z1_1 = self.x_1
++
++                self.x_2 = output - (-1.61100358 * self.z1_2) - (0.96592171 * self.z2_2)
++                output = 1.0 * self.x_2 + -1.61854514 * self.z1_2 + 1.0 * self.z2_2
++                self.z2_2 = self.z1_2
++                self.z1_2 = self.x_2
++
++            elif notch_type == 2:  # 58-62 Hz
++                self.x_1 = output - (-1.40810535 * self.z1_1) - (0.96443153 * self.z2_1)
++                output = 0.96508099 * self.x_1 + (-1.40747202 * self.z1_1) + (0.96508099 * self.z2_1)
++                self.z2_1 = self.z1_1
++                self.z1_1 = self.x_1
++
++                self.x_2 = output - (-1.45687509 * self.z1_2) - (0.96573127 * self.z2_2)
++                output = 1.00000000 * self.x_2 + (-1.45839783 * self.z1_2) + (1.00000000 * self.z2_2)
++                self.z2_2 = self.z1_2
++                self.z1_2 = self.x_2
++
++        elif self.sampling_rate == 250:
++            if notch_type == 1:  # 48-52 Hz
++                self.x_1 = output - (-0.53127491 * self.z1_1) - (0.93061518 * self.z2_1)
++                output = 0.93137886 * self.x_1 + (-0.57635175 * self.z1_1) + 0.93137886 * self.z2_1
++                self.z2_1 = self.z1_1
++                self.z1_1 = self.x_1
++
++                self.x_2 = output - (-0.66243374 * self.z1_2) - (0.93214913 * self.z2_2)
++                output = 1.00000000 * self.x_2 + (-0.61881558 * self.z1_2) + 1.00000000 * self.z2_2
++                self.z2_2 = self.z1_2
++                self.z1_2 = self.x_2
++
++            elif notch_type == 2:  # 58-62 Hz
++                self.x_1 = output - (-0.05269865 * self.z1_1) - (0.93123336 * self.z2_1)
++                output = 0.93137886 * self.x_1 + (-0.11711144 * self.z1_1) + 0.93137886 * self.z2_1
++                self.z2_1 = self.z1_1
++                self.z1_1 = self.x_1
++
++                self.x_2 = output - (-0.18985625 * self.z1_2) - (0.93153034 * self.z2_2)
++                output = 1.00000000 * self.x_2 + (-0.12573985 * self.z1_2) + 1.00000000 * self.z2_2
++                self.z2_2 = self.z1_2
++                self.z1_2 = self.x_2
++
++        return output
++
++
++class EXGFilter:
++    """ECG/EOG/EEG/EMG bandpass filter bank. One instance PER CHANNEL (has internal state)."""
++
++    def __init__(self):
++        self.z1 = 0.0
++        self.z2 = 0.0
++        self.x1 = 0.0
++        self.x2 = 0.0
++        self.x3 = 0.0
++        self.x4 = 0.0
++        self.bits = None
++        self.bits_points = 0
++        self.sampling_rate = 0
++
++    def set_bits(self, bits: str, sampling_rate: int):
++        self.sampling_rate = sampling_rate
++        self.bits = bits
++        self.bits_points = 2 ** int(bits)
++
++    def process(self, input_val: float, exg_type: int) -> float:
++        if not exg_type:
++            return input_val
++
++        output = input_val
++        ch_data = 0.0
++
++        if self.sampling_rate == 500:
++            if exg_type == 4:  # EMG, 70Hz
++                self.x4 = output - (-0.82523238 * self.z1) - (0.29463653 * self.z2)
++                output = 0.52996723 * self.x4 + -1.05993445 * self.z1 + 0.52996723 * self.z2
++                self.z2 = self.z1
++                self.z1 = self.x4
++                ch_data = output
++            # (ECG/EOG/EEG cases omitted here- add back from filters.ts if you need them)
++
++        elif self.sampling_rate == 250:
++            if exg_type == 4:  # EMG, 70Hz
++                self.x4 = output - 0.22115344 * self.z1 - 0.18023207 * self.z2
++                output = 0.23976966 * self.x4 + -0.47953932 * self.z1 + 0.23976966 * self.z2
++                self.z2 = self.z1
++                self.z1 = self.x4
++                ch_data = output
++
++        return ch_data
++
++
+--- upstream/make_synthetic_fixture.py
++++ adapted/make_synthetic_fixture.py
+@@ -0,0 +1,21 @@
++"""Generate labelled synthetic files solely for training-path smoke testing."""
++from pathlib import Path
++import json
++import numpy as np
++import pandas as pd
++from rate_filters import PROFILE
++root=Path(__file__).resolve().parents[1]/'verification'/'synthetic_data'
++root.mkdir(parents=True,exist_ok=True);rng=np.random.default_rng(91);manifest=[]
++for trial,part in enumerate(('train','validation','test'),1):
++ for c,label in enumerate(('extension','flexion','pinch','rest')):
++  folder=root/label;folder.mkdir(exist_ok=True)
++  path=folder/f'{label}_trial{trial}_synthetic.csv'
++  t=np.arange(2000)/1000
++  v=rng.normal(size=(2000,6));v[:,:3]+=np.sin(2*np.pi*(80+c*30)*t[:,None])*(c+1)
++  v[:,3:]+=c*10
++  pd.DataFrame(v,columns=['ch1','ch2','ch3','accel_x','accel_y','accel_z']).to_csv(path,index=False)
++  path.with_suffix('.beep.json').write_text(json.dumps({'segments':[[0,2000]]}))
++  path.with_suffix('.processing.json').write_text(json.dumps({'sampling_rate':1000,'preprocessing_profile':PROFILE,'synthetic_only':True}))
++  manifest.append({'path':str(path.relative_to(root)),'partition':part,'acquisition_group':f'synthetic_acquisition_{trial}'})
++(root/'split.json').write_text(json.dumps({'files':manifest},indent=2))
++print(root)
+--- upstream/rate_filters.py
++++ adapted/rate_filters.py
+@@ -0,0 +1,58 @@
++"""Shared causal filters. Legacy 250/500 paths retained; explicit 1000 SPS design.
++1000-SPS profile: 2nd-order Butterworth bandstop 48–52 Hz then 2nd-order
++Butterworth highpass 70 Hz, matching the source EMG filter's intended kind.
++These are new coefficients and require newly trained models.
++"""
++import numpy as np
++from scipy.signal import butter
++from legacy_filters import NotchFilter as LegacyNotch, EXGFilter as LegacyEXG
++PROFILE = 'npg-native1000-bs48_52-hp70-v1'
++SAMPLING_RATE = 1000
++
++
++class CausalSOS:
++    def __init__(self, sos):
++        self.sos = np.asarray(sos, dtype=float)
++        self.state = np.zeros((len(sos), 2))
++    def process(self, value):
++        value = float(value)
++        for row, state in zip(self.sos, self.state):
++            b0,b1,b2,a0,a1,a2 = row
++            result = (b0*value+state[0])/a0
++            state[0] = b1*value-a1*result+state[1]
++            state[1] = b2*value-a2*result
++            value = result
++        return value
++
++
++class NotchFilter:
++    def __init__(self):
++        self.legacy=LegacyNotch(); self.rate=None; self.filters={}
++    def set_sampling_rate(self, rate):
++        if rate not in (250,500,1000): raise ValueError('Unsupported sample rate')
++        self.rate=rate;self.filters={}
++        self.legacy.set_sampling_rate(rate)
++    def process(self, value, kind):
++        if kind not in (0,1,2): raise ValueError('Unsupported notch type')
++        if self.rate is None: raise ValueError('Set sampling rate first')
++        if self.rate!=1000:return self.legacy.process(value,kind)
++        if not kind:return float(value)
++        if kind not in self.filters:
++            center=50 if kind==1 else 60
++            self.filters[kind]=CausalSOS(butter(2,[center-2,center+2],btype='bandstop',fs=self.rate,output='sos'))
++        return self.filters[kind].process(value)
++
++
++class EXGFilter:
++    def __init__(self):
++        self.legacy=LegacyEXG();self.rate=None;self.filter=None
++    def set_bits(self,bits,rate):
++        if rate not in (250,500,1000):raise ValueError('Unsupported sample rate')
++        self.rate=rate;self.legacy.set_bits(bits,rate)
++        self.filter=CausalSOS(butter(2,70,btype='highpass',fs=rate,output='sos')) if rate==1000 else None
++    def process(self,value,kind):
++        if self.rate is None:raise ValueError('Set sampling rate first')
++        if self.rate!=1000:return self.legacy.process(value,kind)
++        if kind==0:return float(value)
++        if kind!=4:raise ValueError('Only Off/EMG supported')
++        return self.filter.process(value)
+--- upstream/record_gesture.py
++++ adapted/record_gesture.py
+@@ -223,6 +223,7 @@
+ SAMPLES_PER_PACKET = 20  # BLOCK_COUNT in firmware
+ IMU_SAMPLE_LEN = 7       # firmware IMU_SAMPLE_SIZE: 1 counter byte + 3x int16 (ax,ay,az)
+ OUTPUT_ROOT = "training_data"
++VISUAL_CUES = True
+ REST_LABEL = "rest"  # baseline/no-movement class, always recorded first
+ MAX_RECORD_SECONDS = 60  # hard cap: recording auto-stops after this many seconds
+ 
+@@ -253,7 +254,7 @@
+ STOP_BEEP_FREQ = 550              # double, lower-pitched beep = "stop/relax now"
+ 
+ # ---- Filter configuration ----
+-SAMPLING_RATE = 500      # must be 250 or 500 (see note above)
++SAMPLING_RATE = 1000     # native band stream; shared rate_filters.py
+ ADC_BITS = "12"          # matches ADC_BITWIDTH_12 in firmware
+ NOTCH_TYPE = 1            # 1 = 48-52Hz (50Hz mains, India/EU), 2 = 58-62Hz (60Hz mains, US)
+ EMG_TYPE = 4               # fixed: 4 = EMG bandpass in EXGFilter
+@@ -426,6 +427,8 @@
+         return ch_data
+ 
+ 
++from rate_filters import NotchFilter, EXGFilter, PROFILE
++
+ _beep_wav_cache = {}         # (freq, duration_ms) -> generated wav path, reused after first use
+ _warned_no_audio_backend = False  # only nag about missing audio once per run
+ 
+@@ -567,6 +570,19 @@
+         self.out_path = out_path
+         self.client = None
+         self.rows = []
++        raw_dir = os.path.abspath('raw_packets')
++        os.makedirs(raw_dir, exist_ok=True)
++        self.raw_path = os.path.join(raw_dir, f'{time.time_ns()}_{self.role}.jsonl')
++        self.raw_file = open(self.raw_path, 'x')
++        self.initialise_filters()
++
++    def preserve_packet(self, characteristic, data):
++        self.raw_file.write(json.dumps({'host_monotonic_ns': time.perf_counter_ns(),
++            'host_unix_ns': time.time_ns(), 'characteristic': characteristic,
++            'payload_hex': bytes(data).hex()}) + '\n')
++        self.raw_file.flush()
++
++    def initialise_filters(self):
+ 
+         # Sample-and-hold accel state, updated asynchronously by
+         # handle_imu_notify() whenever a new IMU notification arrives.
+@@ -589,6 +605,7 @@
+             self.emg_filters.append(emg)
+ 
+     def handle_notify(self, _, data: bytearray):
++        self.preserve_packet(DATA_CHAR_UUID, data)
+         expected_len = SAMPLES_PER_PACKET * (1 + self.channels * 2)
+         if len(data) != expected_len:
+             # Ignore malformed/partial packets
+@@ -624,6 +641,7 @@
+             self.rows.append([t, counter] + filtered_vals + list(self.latest_accel))
+ 
+     def handle_imu_notify(self, _, data: bytearray):
++        self.preserve_packet(IMU_CHAR_UUID, data)
+         """Parses the firmware's IMU characteristic: a batch of 0..32
+         samples, each IMU_SAMPLE_LEN (7) bytes: 1 counter byte + big-endian
+         signed int16 ax, ay, az. Only the LAST sample in the batch is kept
+@@ -673,6 +691,7 @@
+             await self.client.disconnect()
+         except Exception:
+             pass
++        self.raw_file.close()
+         if not self.has_imu:
+             print(f"  (warning) {self.name} never sent an IMU/accel reading this trial "
+                   f"- accel columns are all zeros. Check the board has a working IMU.")
+@@ -769,10 +788,16 @@
+     ts_tag = time.strftime("%Y%m%d-%H%M%S")
+     fname = f"{gesture_name}_trial{trial_num}_{ts_tag}_merged_{addr_tag}.csv"
+     out_path = os.path.join(gesture_dir, fname)
+-    with open(out_path, "w", newline="") as f:
++    with open(out_path, "x", newline="") as f:
+         w = csv.writer(f)
+         w.writerow(header)
+         w.writerows(rows)
++
++    with open(out_path[:-4] + '.processing.json', 'x') as processing_file:
++        json.dump({'sampling_rate': SAMPLING_RATE, 'preprocessing_profile': PROFILE,
++                   'visual_cue_files': [getattr(r,'visual_cue_path',None) for r in recorders_sorted],
++                   'visual_cue_status': [getattr(r,'visual_cue_status',None) for r in recorders_sorted],
++                   'raw_packet_files': [r.raw_path for r in recorders_sorted]}, processing_file, indent=2)
+ 
+     roles = "+".join(f"{r.role}({r.channels}ch)" for r in recorders_sorted)
+     total_feature_cols = ch_num + 3 * len(recorders_sorted)
+@@ -808,7 +833,8 @@
+         for rep_i, idx in enumerate(rep_indices):
+             start = min(idx["go"] + reaction_delay_samples, n)
+             if mode == "continuous":
+-                end = n  # rest: everything after the reaction delay is valid
++                # Visual rest has an explicit end; exclude post-DONE saving time.
++                end = min(idx["stop"], n) if idx["stop"] is not None else n
+             elif idx["stop"] is not None:
+                 end = min(idx["stop"], n)  # exact stop-cue timestamp, most precise
+             else:
+@@ -1105,6 +1131,8 @@
+     gesture_dir = os.path.join(subject_dir, gesture_name)
+     os.makedirs(gesture_dir, exist_ok=True)
+ 
++    if len(resolved_devices)!=1:
++        raise ValueError('Adapted workflow currently supports one band only')
+     recorders = []
+     for dev, role, channels in resolved_devices:
+         # No individual out_path needed anymore- merge_and_save() below
+@@ -1125,6 +1153,21 @@
+ 
+     loop = asyncio.get_event_loop()
+     is_rest = (gesture_name == REST_LABEL)
++
++    if VISUAL_CUES:
++        from pathlib import Path
++        from visual_cues import run_visual_trial
++        cue_path = Path(recorders[0].raw_path).with_suffix('.visual_cues.json')
++        for r in recorders:
++            r.visual_cue_path = str(cue_path)
++        try:
++            reps = await run_visual_trial(gesture_name, recorders, MAX_RECORD_SECONDS,
++                GESTURE_HOLD_MIN_SEC, GESTURE_HOLD_MAX_SEC, REP_INTERVAL_SEC,
++                REP_INTERVAL_JITTER_SEC, cue_path)
++        finally:
++            await asyncio.gather(*(r.stop_and_disconnect() for r in recorders))
++        return merge_and_save(gesture_dir, gesture_name, trial_num, recorders,
++            reps=reps, mode="continuous" if is_rest else "reps")
+ 
+     if is_rest:
+         # --- Simple flow: one beep, then hold the pose (relaxed/still) for
+@@ -1179,6 +1222,7 @@
+         # now random per-rep (not a fixed value), so there's nothing fixed
+         # to subtract here; REP_INTERVAL_SEC is just the relax time itself.
+         relax_gap = max(0.3, REP_INTERVAL_SEC)
++        trial_deadline = time.monotonic() + MAX_RECORD_SECONDS
+ 
+         async def beep_loop():
+             while not stop_event.is_set():
+@@ -1192,6 +1236,9 @@
+                 except asyncio.TimeoutError:
+                     pass
+                 if stop_event.is_set():
++                    break
++                # Leave room for the longest hold and audio cues before the cap.
++                if trial_deadline - time.monotonic() < GESTURE_HOLD_MAX_SEC + 2.0:
+                     break
+ 
+                 # Single high beep: start the gesture now.
+@@ -1350,6 +1397,7 @@
+         description="Record EMG gesture trials with a repeating beep cue."
+     )
+     ap.add_argument("--rep_interval", type=float, default=REP_INTERVAL_SEC,
++                     # Visual mode is the default; source audio path remains optional.
+                      help=f"average seconds between beeps during a gesture recording "
+                           f"(default {REP_INTERVAL_SEC}) - raise this if the pace feels "
+                           f"too fast to react to")
+@@ -1369,11 +1417,13 @@
+     ap.add_argument("--all_devices", action="store_true",
+                      help="connect to EVERY NPG-Lite board in range (old multi-ArmBand "
+                           "behavior) instead of prompting to pick one")
++    ap.add_argument("--cue_mode", choices=("visual","audio"), default="visual", help="On-screen countdown by default; optional audio cues")
+     return ap.parse_args()
+ 
+ 
+ if __name__ == "__main__":
+     args = parse_args()
++    VISUAL_CUES = args.cue_mode == 'visual'
+     # Override the module-level pacing constants from the CLI. Every
+     # function above reads these by name at call time, so reassigning them
+     # here (before main() actually runs) takes effect everywhere.
+@@ -1396,4 +1446,4 @@
+     except KeyboardInterrupt:
+         print("\nInterrupted.")
+     except Exception as e:
+-        print(f"Error: {e}")+        print(f"Error: {e}")
+--- upstream/run_single_trial.py
++++ adapted/run_single_trial.py
+@@ -0,0 +1,45 @@
++"""One supplier recording with visible Start/Stop controls; no terminal prompts."""
++import argparse
++import asyncio
++import json
++from pathlib import Path
++from bleak import BleakScanner
++import record_gesture as recorder
++
++
++async def main(args):
++    root=Path(recorder.OUTPUT_ROOT)
++    print('Scanning for the band...',flush=True)
++    found=await BleakScanner.discover(timeout=10,return_adv=True)
++    matches=[d for d,a in found.values() if '27:bc' in (a.local_name or d.name or '').lower()]
++    if len(matches)!=1:raise RuntimeError(f'Expected one 27:BC band; found {len(matches)}')
++    devices=recorder.resolve_devices(matches)
++    subject_dir=root/args.subject;subject_dir.mkdir(parents=True,exist_ok=True)
++    trial=recorder.next_trial_number(str(subject_dir),args.gesture)
++    print(f'{args.subject} / {args.gesture} / trial {trial} / {args.partition} / {args.group}',flush=True)
++    result=await recorder.record_gesture(args.gesture,devices,trial,str(subject_dir))
++    index=recorder.load_dataset_index(str(root))
++    recorder.register_session(index,args.subject,args.gesture,result,trial)
++    entry=next(x for x in index['subjects'][args.subject][args.gesture]['sessions'] if x['trial']==trial)
++    entry.update(include_in_training=False,exclusion_reason='Pending user cue compliance confirmation',partition=args.partition,acquisition_group=args.group)
++    recorder.save_dataset_index(str(root),index)
++    path=Path(result['csv_path'])
++    manifest_path=root/'split_manifest.json'
++    manifest=json.loads(manifest_path.read_text()) if manifest_path.exists() else {'files':[]}
++    relative=str(path.relative_to(root))
++    if any(x['path']==relative for x in manifest['files']):raise ValueError('File already assigned')
++    manifest['files'].append({'path':relative,'partition':args.partition,'acquisition_group':args.group})
++    manifest_path.write_text(json.dumps(manifest,indent=2))
++    print(json.dumps({'file':str(path),'trial':trial,'partition':args.partition,'pending_user_confirmation':True,'result':result},indent=2),flush=True)
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--subject',required=True);p.add_argument('--gesture',required=True,choices=('rest','pinch','flexion','extension'))
++    p.add_argument('--partition',required=True,choices=('train','validation','test'));p.add_argument('--group',required=True)
++    args=p.parse_args()
++    if not args.subject or any(c not in 'abcdefghijklmnopqrstuvwxyz0123456789_-' for c in args.subject):p.error('Use a simple subject folder name')
++    recorder.VISUAL_CUES=True;recorder.MAX_RECORD_SECONDS=30;recorder.REACTION_DELAY_SEC=.5
++    recorder.GESTURE_HOLD_MIN_SEC=3;recorder.GESTURE_HOLD_MAX_SEC=5
++    recorder.REP_INTERVAL_SEC=6;recorder.REP_INTERVAL_JITTER_SEC=.5
++    asyncio.run(main(args))
+--- upstream/split_plan.py
++++ adapted/split_plan.py
+@@ -0,0 +1,30 @@
++"""Explicit whole-acquisition split required before creating overlapping windows."""
++import json
++from pathlib import Path
++PARTITIONS=('train','validation','test')
++
++
++def load_plan(path,root):
++    root=Path(root).resolve();data=json.loads(Path(path).read_text());files={};groups={}
++    for entry in data['files']:
++        name=(root/entry['path']).resolve()
++        if not name.is_relative_to(root):raise ValueError('Split path outside dataset')
++        part=entry['partition'];group=entry['acquisition_group']
++        if part not in PARTITIONS:raise ValueError('Unknown partition')
++        if name in files:raise ValueError('Duplicate file in split plan')
++        if group in groups and groups[group]!=part:raise ValueError('Acquisition group crosses partitions')
++        groups[group]=part;files[name]=part
++    return files
++
++
++def partition_for(plan,path):
++    return plan[Path(path).resolve()]
++
++
++def verify_processing(path,profile):
++    metadata=Path(path).with_suffix('.processing.json')
++    data=json.loads(metadata.read_text())
++    if any(status not in (None,'complete') for status in data.get('visual_cue_status',[])):
++        raise ValueError(f'Incomplete visual trial requires exclusion/review: {path}')
++    if data.get('sampling_rate')!=1000 or data.get('preprocessing_profile')!=profile:
++        raise ValueError(f'Processing mismatch: {path}')
+--- upstream/train_gesture_model.py
++++ adapted/train_gesture_model.py
+@@ -78,7 +78,8 @@
+ import numpy as np
+ import pandas as pd
+ from sklearn.metrics import classification_report, confusion_matrix
+-from sklearn.model_selection import train_test_split
++from split_plan import load_plan, partition_for, verify_processing, PARTITIONS
++from rate_filters import PROFILE
+ from sklearn.preprocessing import LabelEncoder
+ from tensorflow import keras
+ 
+@@ -87,7 +88,7 @@
+ # Must match the SAMPLING_RATE used in record_gesture.py (the Notch/EXG
+ # filter coefficients only exist for 250 and 500 Hz - see that file's
+ # docstring for the firmware-rate mismatch note).
+-SAMPLING_RATE = 500
++SAMPLING_RATE = 1000
+ 
+ DATASET_INDEX_FILENAME = "dataset_index.json"
+ 
+@@ -105,6 +106,14 @@
+         return None
+     with open(beep_path) as f:
+         meta = json.load(f)
++    review_path = os.path.splitext(csv_path)[0] + '.segments_review.json'
++    if os.path.exists(review_path):
++        with open(review_path) as f:
++            reviewed = json.load(f)['segments']
++        original = meta.get('segments', [])
++        if any(not (0 <= a < b and any(x <= a and b <= y for x,y in original)) for a,b in reviewed):
++            raise ValueError(f'Reviewed intervals must remain inside original cue segments: {csv_path}')
++        return [tuple(s) for s in reviewed]
+     if "segments" in meta:
+         return [tuple(s) for s in meta["segments"]]
+     # Backward compat with the older single-beep sidecar format.
+@@ -264,9 +273,10 @@
+                           "is auto-discovered and combined.")
+     ap.add_argument("--out_dir", default="gesture_model")
+     ap.add_argument("--arch", choices=["cnn", "lstm", "cnn_lstm"], default="cnn_lstm")
+-    ap.add_argument("--window_size", type=int, default=250,
+-                     help="samples per window (250 @ 500Hz = 0.5s)")
+-    ap.add_argument("--stride", type=int, default=125,
++    ap.add_argument("--split_manifest", required=True, help="Explicit whole-acquisition train/validation/test assignment JSON")
++    ap.add_argument("--window_size", type=int, default=500,
++                     help="samples per window (500 @ 1000Hz = 0.5s)")
++    ap.add_argument("--stride", type=int, default=250,
+                      help="hop between windows (125 = 50%% overlap)")
+     ap.add_argument("--epochs", type=int, default=60)
+     ap.add_argument("--batch_size", type=int, default=32)
+@@ -294,6 +304,8 @@
+               f"consecutive windows will skip {args.stride - args.window_size} "
+               f"sample(s) of every segment.")
+ 
++    if os.path.exists(os.path.join(args.out_dir,'model.keras')):
++        raise FileExistsError('Model output exists; choose a new --out_dir')
+     os.makedirs(args.out_dir, exist_ok=True)
+ 
+     print("Loading CSVs...")
+@@ -337,10 +349,14 @@
+ 
+     print(f"  Feature columns ({num_channels} total): {ch_cols}")
+ 
++    plan = load_plan(args.split_manifest, args.data_dir)
++    all_partitions = []
+     all_windows = []
+     all_labels = []
+     no_beep_files = []
+     for label, df, f, segments in items:
++        partition = partition_for(plan, f)
++        verify_processing(f, PROFILE)
+         cols = get_channel_columns(df)
+         if segments is None:
+             no_beep_files.append(f)
+@@ -354,6 +370,7 @@
+             print(f"  (skip) {f}: {reason}")
+             continue
+         all_windows.append(w)
++        all_partitions.extend([partition] * len(w))
+         all_labels.extend([label] * w.shape[0])
+ 
+     if no_beep_files and not args.ignore_beep_marker:
+@@ -383,14 +400,14 @@
+     y_onehot = keras.utils.to_categorical(y_int, num_classes=num_classes)
+     print(f"  Classes: {list(le.classes_)}")
+ 
+-    # Train/val/test split, stratified so every gesture is represented in each split.
+-    X_train, X_temp, y_train, y_temp, yi_train, yi_temp = train_test_split(
+-        X, y_onehot, y_int, test_size=0.3, random_state=42, stratify=y_int
+-    )
+-    X_val, X_test, y_val, y_test, yi_val, yi_test = train_test_split(
+-        X_temp, y_temp, yi_temp, test_size=0.5, random_state=42, stratify=yi_temp
+-    )
+-    print(f"  Train/Val/Test: {len(X_train)}/{len(X_val)}/{len(X_test)}")
++    partitions = np.array(all_partitions)
++    for part in PARTITIONS:
++        if set(y_raw[partitions == part]) != set(le.classes_):
++            raise ValueError(f'{part} must contain every class from separate acquisitions')
++    X_train, X_val, X_test = [X[partitions == p] for p in PARTITIONS]
++    y_train, y_val, y_test = [y_onehot[partitions == p] for p in PARTITIONS]
++    yi_train, yi_val, yi_test = [y_int[partitions == p] for p in PARTITIONS]
++    print(f'Whole-acquisition train/validation/test: {len(X_train)}/{len(X_val)}/{len(X_test)}')
+ 
+     # Z-score normalization, stats computed on TRAIN split only.
+     mean = X_train.mean(axis=(0, 1))
+@@ -500,6 +517,9 @@
+               f"confusion_matrix.csv still has the raw numbers.")
+ 
+     meta = {
++        "synthetic_only": any(json.load(open(os.path.splitext(f)[0]+".processing.json")).get("synthetic_only",False) for _,_,f,_ in items),
++        "preprocessing_profile": PROFILE,
++        "split_manifest": os.path.abspath(args.split_manifest),
+         "arch": args.arch,
+         "window_size": args.window_size,
+         "stride": args.stride,
+@@ -550,4 +570,4 @@
+ 
+ 
+ if __name__ == "__main__":
+-    main()+    main()
+--- upstream/verify_trial.py
++++ adapted/verify_trial.py
+@@ -0,0 +1,58 @@
++"""Read-only acquisition/label QC; writes a separate summary, never changes samples."""
++import argparse
++import csv
++import hashlib
++import json
++import math
++import struct
++from pathlib import Path
++
++
++def verify(path):
++    path=Path(path).resolve()
++    processing=json.loads(path.with_suffix('.processing.json').read_text())
++    cue=json.loads(path.with_suffix('.beep.json').read_text())
++    raw_files=processing['raw_packet_files']
++    if len(raw_files)!=1:raise ValueError('Single-band verification only')
++    packets=[json.loads(x) for x in Path(raw_files[0]).read_text().splitlines()]
++    streams={}
++    for kind,name,fmt in [('beb5483e-36e1-4688-b7f5-ea07361b26a8','emg','>BHHH'),('5a153fa9-7be0-400c-8ef8-d84502b31c4d','accel','>Bhhh')]:
++        selected=[x for x in packets if x['characteristic']==kind]
++        frames=[];valid=[];malformed=empty=unexpected=0
++        for packet in selected:
++            data=bytes.fromhex(packet['payload_hex'])
++            if not data:empty+=1;continue
++            if len(data)%7:malformed+=1;continue
++            if name=='emg' and len(data)!=140:unexpected+=1
++            decoded=list(struct.iter_unpack(fmt,data));frames.extend(decoded);valid.append((packet,len(decoded)))
++        if not frames:raise ValueError(f'No {name} frames')
++        span=(valid[-1][0]['host_monotonic_ns']-valid[0][0]['host_monotonic_ns'])/1e9
++        steps=[(b[0]-a[0])%256 for a,b in zip(frames,frames[1:])]
++        streams[name]={'samples':len(frames),'packets':len(selected),'malformed':malformed,'empty':empty,
++            'nonunit_transitions':sum(x!=1 for x in steps),'duplicate_transitions':steps.count(0),
++            'received_sps':(len(frames)-valid[0][1])/span if span else None,
++            'arrival_span_s':span,'ranges':[[min(r[i] for r in frames),max(r[i] for r in frames)] for i in (1,2,3)]}
++        if name=='emg':streams[name]['unexpected_packet_lengths']=unexpected
++    with path.open() as f:rows=list(csv.DictReader(f))
++    if len(rows)!=streams['emg']['samples']:raise ValueError('Processed/raw EMG sample count mismatch')
++    original=cue.get('segments',[]);segments=original
++    reviewed=path.with_suffix('.segments_review.json')
++    if reviewed.exists():
++        segments=json.loads(reviewed.read_text())['segments']
++        if any(not (0<=a<b and any(x<=a and b<=y for x,y in original)) for a,b in segments):raise ValueError('Invalid reviewed intervals')
++    if any(not 0<=a<b<=len(rows) for a,b in segments):raise ValueError('Invalid segment bounds')
++    visuals=[json.loads(Path(p).read_text()) for p in processing.get('visual_cue_files',[]) if p]
++    return {'processed_csv':str(path),'processed_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
++        'raw_sha256':hashlib.sha256(Path(raw_files[0]).read_bytes()).hexdigest(),
++        'profile':processing['preprocessing_profile'],'streams':streams,
++        'processed_values_finite':all(math.isfinite(float(v)) for r in rows for v in r.values()),
++        'segments':segments,'selected_samples':sum(b-a for a,b in segments),
++        'complete_repetitions':sum(r.get('stop_time') is not None for r in cue['reps']),
++        'incomplete_active_repetitions':sum(r.get('stop_time') is None for r in cue['reps']) if cue['mode']=='reps' else 0,
++        'visual_status':[v['status'] for v in visuals],
++        'user_compliance':'pending','note':'Host arrival rates and cue labels; not calibrated sensor timing or physiological verification.'}
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--csv',type=Path,required=True);p.add_argument('--output',type=Path,required=True);args=p.parse_args()
++    result=verify(args.csv);args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
+--- upstream/visual_cues.py
++++ adapted/visual_cues.py
+@@ -0,0 +1,91 @@
++"""Visual-only supplier trial cues, preserving host dispatch times and repetitions."""
++import asyncio
++import json
++import random
++import secrets
++import threading
++import time
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++
++INSTRUCTIONS={
++ 'rest':'Forearm supported; wrist comfortable; fingers relaxed.',
++ 'pinch':'Gently touch thumb to index fingertip; other fingers loose; wrist steady.',
++ 'flexion':'Gently bend your hand toward the palm side; forearm supported; fingers loose.',
++ 'extension':'Gently bend your hand toward the back-of-hand side; forearm supported; fingers loose.'}
++PAGE='''<!doctype html><meta charset="utf-8"><title>Gesture trial timer</title>
++<style>body{font:23px system-ui;background:#111827;color:#f3f4f6;text-align:center;padding:24px}h1{font-size:50px;margin:20px}#timer{font-size:80px}p{max-width:780px;margin:20px auto}button{font:inherit;padding:14px 30px;margin:8px}#detail{min-height:65px}</style>
++<h1 id="phase">READY</h1><div id="timer">—</div><p id="detail">Connecting…</p><p id="trial"></p><button id="start">Start trial</button><button id="stop">Stop trial</button><p id="status"></p>
++<script>
++const start=document.getElementById('start'),stop=document.getElementById('stop');
++start.onclick=async()=>{await fetch('/start',{method:'POST'});start.disabled=true;};stop.onclick=async()=>{await fetch('/stop',{method:'POST'});stop.disabled=true;};
++async function update(){try{const response=await fetch('/status',{cache:'no-store'});const s=await response.json();document.getElementById('phase').textContent=s.phase;document.getElementById('timer').textContent=s.seconds_left.toFixed(1);document.getElementById('detail').textContent=s.instruction;document.getElementById('trial').textContent='Trial remaining: '+s.trial_seconds_left.toFixed(1)+' s'+(s.repetition?' · Repetition '+s.repetition:'');document.getElementById('status').textContent=s.status;start.hidden=s.phase!=='READY';if(s.done){stop.hidden=true;return;}}catch(e){document.getElementById('status').textContent='Recorder unavailable — relax';}setTimeout(update,80);}update();
++</script>'''
++
++
++def build_schedule(gesture,seconds,hold_min,hold_max,gap,jitter,seed):
++    rng=random.Random(seed);schedule=[];elapsed=0;rep=0
++    if gesture=='rest':return [('REST',seconds,0)]
++    while elapsed<seconds:
++        relax=max(.3,gap+rng.uniform(-jitter,jitter))
++        if elapsed+relax+hold_max+.2>seconds:
++            schedule.append(('RELAX',seconds-elapsed,0));break
++        schedule.append(('RELAX',relax,rep));elapsed+=relax
++        rep+=1;hold=rng.uniform(hold_min,hold_max)
++        schedule.append((gesture.upper(),hold,rep));elapsed+=hold
++    return schedule
++
++
++async def run_visual_trial(gesture,recorders,seconds,hold_min,hold_max,gap,jitter,path):
++    requested=threading.Event();aborted=threading.Event()
++    state={'phase':'READY','seconds_left':seconds,'trial_seconds_left':seconds,'repetition':0,
++           'instruction':INSTRUCTIONS[gesture],'status':'Connected · visual cues only · click Start when settled','done':False}
++    class Handler(BaseHTTPRequestHandler):
++        def log_message(self,*args):pass
++        def do_GET(self):
++            payload=json.dumps(state).encode() if self.path=='/status' else PAGE.encode()
++            self.send_response(200);self.send_header('Content-Type','application/json' if self.path=='/status' else 'text/html; charset=utf-8');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(payload)
++        def do_POST(self):
++            host=self.headers.get('Host','')
++            if host!=f'127.0.0.1:{server.server_port}' or self.headers.get('Origin')!=f'http://{host}' or self.path not in ('/start','/stop'):
++                self.send_error(403);return
++            (requested if self.path=='/start' else aborted).set();self.send_response(204);self.end_headers()
++    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start()
++    print(f'VISUAL CUE PAGE: http://127.0.0.1:{server.server_port}',flush=True)
++    seed=secrets.randbits(32);schedule=build_schedule(gesture,seconds,hold_min,hold_max,gap,jitter,seed)
++    reps=[];events=[];status='interrupted';protocol_start=None
++    def event(phase,rep):
++        now=time.time();events.append({'phase':phase,'repetition':rep,'host_unix_ns':time.time_ns(),'host_monotonic_ns':time.perf_counter_ns(),'received_samples':[len(r.rows) for r in recorders]});return now
++    async def phase_wait(phase,duration,rep,deadline):
++        state.update(phase=phase,repetition=rep,instruction=INSTRUCTIONS[gesture] if phase==gesture.upper() or phase=='REST' else 'Release and return to a comfortable relaxed hand position.',status='Follow the on-screen instruction')
++        while time.perf_counter()<deadline:
++            if aborted.is_set():raise InterruptedError('User stopped visual trial')
++            if not all(r.client.is_connected for r in recorders):raise ConnectionError('Band disconnected')
++            state['seconds_left']=max(0,deadline-time.perf_counter());state['trial_seconds_left']=max(0,seconds-(time.perf_counter()-protocol_start)) if protocol_start else seconds
++            await asyncio.sleep(.02)
++    try:
++        wait_until=time.perf_counter()+300
++        while not requested.is_set():
++            if aborted.is_set():raise InterruptedError('User stopped before Start')
++            if time.perf_counter()>wait_until:raise TimeoutError('Start timed out')
++            if not all(r.client.is_connected for r in recorders):raise ConnectionError('Band disconnected')
++            await asyncio.sleep(.05)
++        event('GET READY',0);await phase_wait('GET READY',5,0,time.perf_counter()+5)
++        protocol_start=time.perf_counter();elapsed=0
++        for phase,duration,rep in schedule:
++            stamp=event(phase,rep)
++            if phase==gesture.upper() or phase=='REST':
++                reps.append({'go':stamp,'stop':None,'hold_sec':duration})
++            await phase_wait(phase,duration,rep,protocol_start+elapsed+duration)
++            elapsed+=duration
++            if phase==gesture.upper():reps[-1]['stop']=time.time()
++        event('DONE',0);status='complete'
++    except InterruptedError:
++        status='user_stopped'
++    finally:
++        for recorder in recorders:
++            recorder.visual_cue_status=status
++        state.update(phase='DONE — RELAX' if status=='complete' else 'STOPPED — RELAX',seconds_left=0,trial_seconds_left=0,done=True,status='Trial finished; saving recording')
++        path.write_text(json.dumps({'status':status,'gesture':gesture,'seconds':seconds,'seed':seed,'schedule':schedule,'events':events,'note':'Host cue dispatch times; browser polling/rendering and human reaction delays remain. No sound cues. Original packets saved separately.'},indent=2))
++        await asyncio.sleep(2)
++        server.shutdown();server.server_close()
++    return reps
