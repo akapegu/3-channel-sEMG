@@ -1,4 +1,4 @@
-# Wearable EMG Gesture Control
+# 3-channel-sEMG
 
 Python tools and experiments for collecting three-channel forearm EMG, testing gesture classifiers, and exploring real-time control with an Upside Down Labs NPG-Lite band.
 
