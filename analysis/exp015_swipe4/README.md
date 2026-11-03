@@ -83,6 +83,23 @@ The candidate selected in the Session 2 screen was fixed: 400 ms window, 20 ms h
 
 This confirms some cross-wear transfer, but Session 3 is still development data. It is the third wearing for one user on nearby dates; cue-level majority votes do not measure onset latency, and the target error is TOP→REST. Before Session 4, run session-held-out model/window validation across Sessions 1–3, inspect TOP trials, choose/freeze one pipeline, then collect Session 4 as the untouched final evaluation. Full metrics and reproducible entry point: `session3_confirmation.json` and `evaluate_session3_confirmation.py`.
 
+### Session-held-out validation across Sessions 1–3 (2026-11-04)
+
+Ran three folds: in each fold, fit on two complete sessions and score on the third. This uses all sessions across folds but no single validation model sees all three. The five-candidate screen favored Extra Trees with EMG+accelerometer, 400 ms windows, and a 20 ms hop.
+
+| Held-out session | Event accuracy | Gesture accuracy | Tilt-only false commands | TOP recall |
+|---|---:|---:|---:|---:|
+| Session 1 | 102/120 (85.0%) | 66/80 (82.5%) | 4/40 (10%) | 20/20 (100%) |
+| Session 2 | 101/120 (84.2%) | 61/80 (76.25%) | 0/40 | 16/20 (80%) |
+| Session 3 | 102/120 (85.0%) | 62/80 (77.5%) | 0/40 | 13/20 (65%) |
+| Pooled out-of-session | 305/360 (84.7%) | 189/240 (78.75%) | 4/120 (3.3%) | 49/60 (81.7%) |
+
+All 11 missed TOP events in Sessions 2–3 were predicted REST. Their median filtered EMG RMS was lower than correctly recognized TOP trials, especially on channels 1 and 2, and approached tilt-control values on those channels. This is descriptive evidence that the weak TOP attempts may be less muscle-active or differ after re-wearing; it does not prove why. Candidate comparisons: ET fusion 300 ms, 79.7% event / 71.25% gesture; ET fusion 200 ms, 71.1% / 57.1%; ET EMG-only 400 ms, 76.7% / 68.75%; RBF SVM fusion 400 ms, 62.5% / 60.8% with 41/120 false tilt commands.
+
+This screen is below the project's 90% event-accuracy and zero-tilt-false-command targets. Candidate selection used these same three folds, so pooled results are development estimates and may be optimistic. Leave-one-session-out results and error detail: `session1_3_leave_one_session_out.json`; rerun with `evaluate_leave_one_session_out.py` using explicit local paths.
+
+After the comparison, fit the provisional Extra Trees fusion 400 ms candidate on all Sessions 1–3 (20,145 training windows) for an eventual Session 4 evaluation. This model is not validated by its training fit. Local artifacts are in `model_session123/`; they are excluded from Git. The reusable fit command is `train_session123_candidate.py`. Session 4 is still untouched and should be evaluated once; cross-session robustness is why the split follows full sessions, as in [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html).
+
 ## References
 
 - Hudgins, Parker & Scott (1993), foundational time-domain myoelectric pattern recognition: [PubMed](https://pubmed.ncbi.nlm.nih.gov/8468080/).
