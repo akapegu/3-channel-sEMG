@@ -23,6 +23,7 @@
 # Model weights, signal exports, plots, and numerical caches
 *.csv
 *.json
+!analysis/exp015_swipe4/robust_session_template.json
 *.jsonl
 *.npz
 *.joblib
