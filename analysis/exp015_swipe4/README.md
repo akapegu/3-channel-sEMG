@@ -142,9 +142,25 @@ EMG-only had the higher gesture recall, but its Session 4 errors are not accepta
 
 The all-session EMG-only development artifact is local/ignored at `cnn_lstm_sessions/cnn_lstm_all_sessions.keras`; its exact scaling values and fold predictions are in the ignored `cnn_lstm_sessions/cnn_lstm_session_loso.json`. The artifact was trained for 29 epochs using 1,847 windows, with 467 complete-cue validation windows used for early stopping. It is for offline/shadow development only. Reproduce the comparison with `train_cnn_lstm_sessions.py` and the installed `supplier_toolkit/upstream/requirements.txt` dependencies.
 
+### Within-session grouped CNN-LSTM accuracy (2026-11-04)
+
+To separate same-wearing recognizability from re-wear transfer, evaluated each session independently with five-fold cue-grouped cross-validation. In each fold, 20% of complete cues were test data; within the remaining cues, another 20% per class was held out for early stopping. All overlapping windows from a cue stayed together. The model used the supplier CNN-LSTM and 500 ms / 250 ms windows. Results pool out-of-fold predictions for the 120 cues in each session.
+
+| Wearing | EMG-only gesture accuracy | EMG-only false tilt commands | Fused gesture accuracy | Fused false tilt commands |
+|---|---:|---:|---:|---:|
+| Session 1 | 41/80 (51.3%) | 35/40 | 57/80 (71.3%) | 4/40 |
+| Session 2 | 43/80 (53.8%) | 26/40 | 50/80 (62.5%) | 0/40 |
+| Session 3 | 45/80 (56.3%) | 32/40 | 54/80 (67.5%) | 3/40 |
+| Session 4 | 33/80 (41.3%) | 14/40 | 50/80 (62.5%) | 1/40 |
+| Pooled within-session OOF | 162/320 (50.6%) | 107/160 | 211/320 (65.9%) | 8/160 |
+
+Fusion performed better on relaxed-finger tilt controls, but gesture accuracy remained below the 90% project target. Fold gesture accuracy varied widely: 25–81% in Session 2, 31–81% in Session 3, and 50–81% in Session 4 for fusion. This indicates substantial repetition-level variability within wearings; it does not establish that every prompted action was consistently represented in the signal. EMG-only alone did not separate tilt controls reliably.
+
+These are same-wearing diagnostic scores, not an independent test. Model settings were developed using these sessions, and Session 4 was previously inspected. Fold reports and event predictions are local/ignored at `cnn_lstm_sessions/within_session_grouped_cv.json` and `within_session_fusion_grouped_cv.json`. Reproduce with `evaluate_cnn_lstm_within_session.py`.
+
 ### Planned next steps
 
-1. Audit the CNN-LSTM's Session 4 errors descriptively, starting with TOP→LEFT (18/20) and tilt-control→LEFT/DOWN (15/40 total). Compare the labeled cue traces and per-channel EMG features across all four wearings. This analysis may explain what to investigate, but Session 4 is already development data and cannot provide another independent score.
+1. Compare within-session and held-session errors cue by cue, starting with low-recall gestures and false tilt commands. This is descriptive diagnosis; Session 4 is already development data and cannot provide another independent score.
 2. Keep the four movement labels unchanged during that audit. If the labeled actions are not physically repeatable/distinct, revise the gesture definitions before collecting more labeled trials. If they are repeatable, record Sessions 5 and 6 as development re-wearings with the same 20 repetitions per gesture and 10 relaxed-finger tilt controls per direction; note placement/orientation changes. Keep EMG-only and fusion candidates separate and score by whole-session holdout.
 3. Freeze one pipeline using Sessions 1–6, then record Session 7 as a new locked evaluation. Include an ordinary no-command activity block in addition to tilt-only controls, because the current 40 REST controls per wearing measure prompted tilts rather than daily false-command rate. This session-wise plan reflects the distribution-shift evaluation emphasized in [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html); NinaPro DB6 studies repeatability with repeated acquisitions over days ([protocol](https://ninapro.hevs.ch/instructions/DB6.html)).
 
