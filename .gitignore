@@ -7,6 +7,7 @@
 
 # Python environments and tool caches
 **/.venv/
+/.venv-cnnlstm/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

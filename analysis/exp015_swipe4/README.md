@@ -120,6 +120,28 @@ Interpretation is limited: the model did not generalize well to this re-wear, wh
 
 Detailed event and window metrics: `session4_locked_test.json`. Reproduce the one-time frozen-model scoring with `evaluate_session4_locked.py`; raw data, cue metadata, and model weights remain local and ignored by Git.
 
+### Supplier-style CNN-LSTM screen across Sessions 1–4 (2026-11-04)
+
+Trained the supplier repository's CNN→LSTM architecture on the four personalized re-wear captures. The architecture uses two Conv1D blocks followed by 64- and 32-unit LSTM layers ([supplier model source](https://github.com/upsidedownlabs/NPG-Lite-ArmBand-Software/blob/main/model_architectures.py#L66-L89)). Input windows were 500 ms with 250 ms hop, matching the supplier's nominal 500 ms window and 50% overlap at this project's 1,000 Hz stream rate. Compared three EMG channels alone against EMG plus the LIS3DH axes.
+
+Validation held out one complete wearing per fold. Within the three training wearings, 20% of complete cued repetitions per class were held out for early stopping; no overlapping windows from a cue were split between fit and validation. Window normalization was fit on the fold's training cues only. The model and protocol therefore differ from the supplier training script's default random split of already-overlapping windows ([windowing code](https://github.com/upsidedownlabs/NPG-Lite-ArmBand-Software/blob/main/train_gesture_model.py#L232-L252), [random train/validation/test split](https://github.com/upsidedownlabs/NPG-Lite-ArmBand-Software/blob/main/train_gesture_model.py#L376-L392)); that script does not hold out complete wearings in its default path.
+
+| Input | Held-session event accuracy | Intended gesture accuracy | Tilt-only false commands |
+|---|---:|---:|---:|
+| EMG only | 361/480 (75.2%) | 217/320 (67.8%) | 16/160 (10.0%) |
+| EMG + accelerometer | 313/480 (65.2%) | 155/320 (48.4%) | 2/160 (1.25%) |
+
+| Held-out wearing | EMG-only gesture accuracy / false tilt commands | Fused gesture accuracy / false tilt commands |
+|---|---:|---:|
+| Session 1 | 49/80 (61.3%) / 0/40 | 40/80 (50.0%) / 0/40 |
+| Session 2 | 58/80 (72.5%) / 0/40 | 32/80 (40.0%) / 0/40 |
+| Session 3 | 60/80 (75.0%) / 1/40 | 55/80 (68.8%) / 0/40 |
+| Session 4 | 50/80 (62.5%) / 15/40 | 28/80 (35.0%) / 2/40 |
+
+EMG-only had the higher gesture recall, but its Session 4 errors are not acceptable: it recognized only 1/20 TOP repetitions and generated 15 false commands in 40 tilt controls. Fusion suppressed most tilt controls but recognized fewer than half the gesture repetitions overall. Neither candidate meets the intended-control requirement. The modality choice was made using these same four folds, so pooled scores are development estimates, not independent final accuracy. Session 4 has already been examined and is no longer a clean final test.
+
+The all-session EMG-only development artifact is local/ignored at `cnn_lstm_sessions/cnn_lstm_all_sessions.keras`; its exact scaling values and fold predictions are in the ignored `cnn_lstm_sessions/cnn_lstm_session_loso.json`. The artifact was trained for 29 epochs using 1,847 windows, with 467 complete-cue validation windows used for early stopping. It is for offline/shadow development only. Reproduce the comparison with `train_cnn_lstm_sessions.py` and the installed `supplier_toolkit/upstream/requirements.txt` dependencies.
+
 ## References
 
 - Hudgins, Parker & Scott (1993), foundational time-domain myoelectric pattern recognition: [PubMed](https://pubmed.ncbi.nlm.nih.gov/8468080/).
