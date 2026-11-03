@@ -91,10 +91,12 @@ async def run_session(recorders, cue_path, plan_path, connect_and_start):
     plan = json.loads(plan_path.read_text())
     schedule, total = make_schedule(plan)
     requested, stopped = threading.Event(), threading.Event()
+    session_number = "".join(ch for ch in str(plan["session"]) if ch.isdigit()) or "?"
+    session_label = f"Session {session_number}"
     n_trials = int(plan["repetitions_per_gesture"]) * len(plan["directions"])
     n_trials += int(plan["tilt_only_repetitions_per_direction"]) * len(plan["directions"])
     state = {"phase": "READY", "seconds_left": 0.0, "cue_word": "READY", "cue_arrow": "",
-             "progress": f"SESSION 1 / 4 · {n_trials} ACTIONS · {total / 60:.1f} MIN",
+             "progress": f"{session_label.upper()} / 4 · {n_trials} ACTIONS · {total / 60:.1f} MIN",
              "status": "Band found · not connected or recording yet", "done": False}
 
     class Handler(BaseHTTPRequestHandler):
@@ -168,10 +170,10 @@ async def run_session(recorders, cue_path, plan_path, connect_and_start):
         started = time.perf_counter()
         settle = {"phase": "SETTLE", "duration": float(plan["initial_settle_seconds"]),
                   "label": "rest", "instruction": "Stay relaxed and still while recording settles."}
-        present_phase(settle, "Session 1 · initial relaxed baseline")
+        present_phase(settle, f"{session_label} · initial relaxed baseline")
         emit("label_start", settle)
         emit("cue_start", settle)
-        await wait_phase(settle, started + settle["duration"], "Session 1 · initial relaxed baseline")
+        await wait_phase(settle, started + settle["duration"], f"{session_label} · initial relaxed baseline")
         emit("cue_stop", settle)
         emit("label_stop", settle)
         elapsed = settle["duration"]

@@ -13,6 +13,7 @@
 
 # Personal biosignal recordings and machine-specific derived data
 /recordings/
+/raw_packets/
 /supplier_toolkit/adapted/raw_packets/
 /supplier_toolkit/adapted/training_data/
 /analysis/exp012_live_flap/
