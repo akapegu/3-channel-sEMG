@@ -98,7 +98,27 @@ All 11 missed TOP events in Sessions 2–3 were predicted REST. Their median fil
 
 This screen is below the project's 90% event-accuracy and zero-tilt-false-command targets. Candidate selection used these same three folds, so pooled results are development estimates and may be optimistic. Leave-one-session-out results and error detail: `session1_3_leave_one_session_out.json`; rerun with `evaluate_leave_one_session_out.py` using explicit local paths.
 
-After the comparison, fit the provisional Extra Trees fusion 400 ms candidate on all Sessions 1–3 (20,145 training windows) for an eventual Session 4 evaluation. This model is not validated by its training fit. Local artifacts are in `model_session123/`; they are excluded from Git. The reusable fit command is `train_session123_candidate.py`. Session 4 is still untouched and should be evaluated once; cross-session robustness is why the split follows full sessions, as in [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html).
+After the comparison, the provisional Extra Trees fusion 400 ms candidate was fit on all Sessions 1–3 (20,145 training windows) for Session 4 evaluation. Its training fit was not a validation score. Local artifacts are in `model_session123/`; they are excluded from Git. The reusable fit command is `train_session123_candidate.py`. Session 4 has since been evaluated once as the locked final test; results are below. Cross-session robustness motivated holding out complete sessions, as in [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html).
+
+### Locked Session 4 final evaluation (2026-11-04)
+
+The frozen Extra Trees fusion candidate (trained on Sessions 1–3; 400 ms features, 20 ms hop) was scored once on Session 4. Session 4 was not used for fitting or tuning. The complete re-wear capture contains 512,640 samples and all 120 in-bounds cues. Packet length, sample counters, finite processed values, and both sensor streams passed capture QC; host-arrival estimates were 1000.052 EMG frames/s and 103.832 accelerometer frames/s.
+
+| Session 4 measure | Result |
+|---|---:|
+| Action interval accuracy | 68/120 (56.7%) |
+| Intended gesture accuracy | 46/80 (57.5%) |
+| Tilt-only controls correctly rejected | 22/40 (55.0%) |
+| False commands on tilt-only controls | 18/40 (45.0%) |
+| DOWN / LEFT / RIGHT / TOP recall | 50% / 50% / 100% / 30% |
+
+The 18 false commands were six each during LEFT-, RIGHT-, and TOP-directed tilts; none occurred during DOWN-directed tilts. Fifteen of 40 REST controls were predicted RIGHT. This is a failed robustness result relative to both the project target and the 84.7% event accuracy / 3.3% false tilt rate from the development leave-one-session-out screen. The model's high RIGHT recall is not enough to offset its false activations.
+
+Raw-packet inspection found exact-zero ADC values on CH2 in 616/512,640 samples (0.120%) and CH3 in 300/512,640 (0.059%); the longest runs were 19 ms and 15 ms. CH1 had none. Sessions 1–3 had no exact-zero EMG samples. Session 4 channel medians were [1266, 1278, 1283] counts, near the earlier sessions' approximate 1280-count medians. These sparse zeros are an anomaly of unknown cause, but do not show a sustained channel outage. They do not by themselves explain or invalidate the low score.
+
+Interpretation is limited: the model did not generalize well to this re-wear, while this one capture cannot identify whether placement, execution variability, distribution shift, or model design caused the errors. The Session 4 test has now been consumed. Do not tune against it and reuse it as a final test. Add new sessions to development, revise and evaluate candidates with complete sessions held out, then collect a new untouched final session. This emphasis on session-wise evaluation reflects known sEMG distribution/repeatability concerns ([EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html); [NinaPro DB6 repeatability protocol](https://ninapro.hevs.ch/instructions/DB6.html)).
+
+Detailed event and window metrics: `session4_locked_test.json`. Reproduce the one-time frozen-model scoring with `evaluate_session4_locked.py`; raw data, cue metadata, and model weights remain local and ignored by Git.
 
 ## References
 
