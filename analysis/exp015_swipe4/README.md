@@ -75,6 +75,14 @@ Candidates were trained only on Session 1 and scored on Session 2; no Session 2 
 
 This is encouraging cross-placement evidence, but it is still a development comparison: the band was re-worn on the same day, there is one training wearing, the candidates were screened on Session 2, and majority votes cover the full prompted interval rather than measuring onset delay. Keep Session 3 for further development/confirmation and Session 4 untouched for the final test. Full metrics: `session2_cross_session_models.json`; rerun with `evaluate_cross_session_window_candidates.py` by supplying local training CSV/cue and test CSV/cue paths. Cross-session evaluation is a central concern in sEMG benchmarks such as [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html).
 
+### Session 1+2 → Session 3 fixed-candidate confirmation (2026-11-04)
+
+Session 3 is a complete re-wear capture with 512,580 samples and 120 in-bounds action cues (20 per gesture plus 40 relaxed-finger tilt controls). EMG and accelerometer counters are continuous; no malformed/empty packets were found; processed values are finite. Host-arrival estimates were 1000.058 EMG frames/s and 103.833 accelerometer frames/s. Raw CSV, packet bytes, and cue metadata remain local and ignored by Git.
+
+The candidate selected in the Session 2 screen was fixed: 400 ms window, 20 ms hop, the same time-domain EMG features plus accelerometer summaries, and Extra Trees. It was trained on Sessions 1+2 and scored on Session 3 without tuning there. It classified 102/120 intervals (85.0%), including 62/80 gestures (77.5%), and made 0/40 false commands on the tilt-only controls. Recall: DOWN 16/20 (80%), LEFT 16/20 (80%), RIGHT 17/20 (85%), TOP 13/20 (65%), REST 40/40. All seven missed TOP cues were predicted REST. This does not meet the project's 90% event-accuracy target; zero false tilt commands in 40 controls does not establish a low real-world false-command rate.
+
+This confirms some cross-wear transfer, but Session 3 is still development data. It is the third wearing for one user on nearby dates; cue-level majority votes do not measure onset latency, and the target error is TOP→REST. Before Session 4, run session-held-out model/window validation across Sessions 1–3, inspect TOP trials, choose/freeze one pipeline, then collect Session 4 as the untouched final evaluation. Full metrics and reproducible entry point: `session3_confirmation.json` and `evaluate_session3_confirmation.py`.
+
 ## References
 
 - Hudgins, Parker & Scott (1993), foundational time-domain myoelectric pattern recognition: [PubMed](https://pubmed.ncbi.nlm.nih.gov/8468080/).
