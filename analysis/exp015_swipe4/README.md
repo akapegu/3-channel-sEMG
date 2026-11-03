@@ -142,6 +142,12 @@ EMG-only had the higher gesture recall, but its Session 4 errors are not accepta
 
 The all-session EMG-only development artifact is local/ignored at `cnn_lstm_sessions/cnn_lstm_all_sessions.keras`; its exact scaling values and fold predictions are in the ignored `cnn_lstm_sessions/cnn_lstm_session_loso.json`. The artifact was trained for 29 epochs using 1,847 windows, with 467 complete-cue validation windows used for early stopping. It is for offline/shadow development only. Reproduce the comparison with `train_cnn_lstm_sessions.py` and the installed `supplier_toolkit/upstream/requirements.txt` dependencies.
 
+### Planned next steps
+
+1. Audit the CNN-LSTM's Session 4 errors descriptively, starting with TOP→LEFT (18/20) and tilt-control→LEFT/DOWN (15/40 total). Compare the labeled cue traces and per-channel EMG features across all four wearings. This analysis may explain what to investigate, but Session 4 is already development data and cannot provide another independent score.
+2. Keep the four movement labels unchanged during that audit. If the labeled actions are not physically repeatable/distinct, revise the gesture definitions before collecting more labeled trials. If they are repeatable, record Sessions 5 and 6 as development re-wearings with the same 20 repetitions per gesture and 10 relaxed-finger tilt controls per direction; note placement/orientation changes. Keep EMG-only and fusion candidates separate and score by whole-session holdout.
+3. Freeze one pipeline using Sessions 1–6, then record Session 7 as a new locked evaluation. Include an ordinary no-command activity block in addition to tilt-only controls, because the current 40 REST controls per wearing measure prompted tilts rather than daily false-command rate. This session-wise plan reflects the distribution-shift evaluation emphasized in [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html); NinaPro DB6 studies repeatability with repeated acquisitions over days ([protocol](https://ninapro.hevs.ch/instructions/DB6.html)).
+
 ## References
 
 - Hudgins, Parker & Scott (1993), foundational time-domain myoelectric pattern recognition: [PubMed](https://pubmed.ncbi.nlm.nih.gov/8468080/).
