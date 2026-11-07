@@ -20,6 +20,7 @@
 /analysis/exp012_live_flap/
 /analysis/exp016_swipe_shadow/signals/
 /analysis/exp016_swipe_shadow/predictions/
+/analysis/exp015_swipe4/cross_session_error_audit/
 /experiment_list.md
 
 # Model weights, signal exports, plots, and numerical caches

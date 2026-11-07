@@ -158,11 +158,26 @@ Fusion performed better on relaxed-finger tilt controls, but gesture accuracy re
 
 These are same-wearing diagnostic scores, not an independent test. Model settings were developed using these sessions, and Session 4 was previously inspected. Fold reports and event predictions are local/ignored at `cnn_lstm_sessions/within_session_grouped_cv.json` and `within_session_fusion_grouped_cv.json`. Reproduce with `evaluate_cnn_lstm_within_session.py`.
 
+### Held-out cue and signal audit across Sessions 1–4 (2026-11-07)
+
+Joined the saved Extra Trees fusion 400 ms event predictions with the original cue timelines and processed signals. For Sessions 1–3, predictions come from leave-one-session-out folds; each session was excluded from its fold's training. Session 4 uses its frozen model trained on Sessions 1–3 and scored once. No model was retrained or tuned for this audit.
+
+| Held-out session | Gesture cues correct | Tilt-only false commands | Most notable errors |
+|---|---:|---:|---|
+| Session 1 | 66/80 (82.5%) | 4/40 | LEFT→REST (9); RIGHT→DOWN (3) |
+| Session 2 | 61/80 (76.3%) | 0/40 | LEFT→REST (8); RIGHT→REST (5) |
+| Session 3 | 62/80 (77.5%) | 0/40 | TOP→REST (7); LEFT→REST (4) |
+| Session 4 | 46/80 (57.5%) | 18/40 | DOWN→RIGHT (8); LEFT→RIGHT (9); TOP→RIGHT (8) or LEFT (6) |
+
+The error profile changed in Session 4: RIGHT was predicted for 15/40 tilt controls, while the held-out misses in Sessions 1–3 were predominantly gesture→REST. Median relaxed-cue processed EMG RMS in Session 4 was CH1/CH2/CH3 = 23.0/4.0/25.4, compared with S1–S3 ranges 12.2–16.2 / 2.8–4.1 / 5.9–9.2. This is a measured distribution difference, not evidence that identifies electrode displacement, skin contact, gesture execution, or noise as its cause.
+
+The frozen Extra Trees model's impurity feature importance sums to 61.3% over EMG features and 38.7% over accelerometer features. This is an internal model split-use measure, not causal evidence. The separate CNN-LSTM modality comparison showed a tradeoff: EMG-only predicted more gesture cues; fusion produced fewer tilt false commands. Neither met the control objective. Full local audit output, cue rows, and its SVG chart are ignored by Git because they are derived from personal biosignals; reproducible code is `audit_heldout_session_errors.py`.
+
 ### Planned next steps
 
-1. Compare within-session and held-session errors cue by cue, starting with low-recall gestures and false tilt commands. This is descriptive diagnosis; Session 4 is already development data and cannot provide another independent score.
-2. Keep the four movement labels unchanged during that audit. If the labeled actions are not physically repeatable/distinct, revise the gesture definitions before collecting more labeled trials. If they are repeatable, record Sessions 5 and 6 as development re-wearings with the same 20 repetitions per gesture and 10 relaxed-finger tilt controls per direction; note placement/orientation changes. Keep EMG-only and fusion candidates separate and score by whole-session holdout.
-3. Freeze one pipeline using Sessions 1–6, then record Session 7 as a new locked evaluation. Include an ordinary no-command activity block in addition to tilt-only controls, because the current 40 REST controls per wearing measure prompted tilts rather than daily false-command rate. This session-wise plan reflects the distribution-shift evaluation emphasized in [EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html); NinaPro DB6 studies repeatability with repeated acquisitions over days ([protocol](https://ninapro.hevs.ch/instructions/DB6.html)).
+1. Record one Session 5 development re-wear with unchanged gesture definitions and cue schedule. Note approximate band location/orientation and perform a repeatable fit/contact check; do not alter classifier settings based on Session 4 and call that an independent evaluation.
+2. After Session 5 capture QC, assess complete-session held-out performance and decide whether another development re-wear is needed. Keep EMG-only and fused models separate in comparisons.
+3. Freeze a pipeline before collecting a new untouched final wearing. Add ordinary no-command activity exposure to the final protocol; current REST examples are prompted tilt controls and do not estimate daily false-command rate. Session-wise evaluation is appropriate because sEMG classifiers face out-of-distribution shifts ([EMGBench](https://proceedings.neurips.cc/paper_files/paper/2024/hash/59fe60482e2e5faf557c37d121994663-Abstract-Datasets_and_Benchmarks_Track.html)); NinaPro DB6 explicitly studies repeatability across acquisitions over five days ([protocol](https://ninapro.hevs.ch/instructions/DB6.html)).
 
 ## References
 
